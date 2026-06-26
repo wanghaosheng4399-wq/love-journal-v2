@@ -1,4 +1,5 @@
-﻿import { useState, useEffect } from 'react'
+﻿"use client";
+import { useState, useEffect } from 'react'
 
 const THEMES = {
   pink: { primary: '#ff6b9d', bg: '#fff5f8', card: '#fff', text: '#3d2c35', border: '#ffe0eb', gradient: 'linear-gradient(135deg, #ff6b9d, #c44dff)', shadow: 'rgba(255,107,157,0.15)' },

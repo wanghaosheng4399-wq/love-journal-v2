@@ -1,4 +1,4 @@
-﻿import { pool } from '../../../db'
+﻿import { pool } from '../../../../db'
 
 export async function GET() {
   const [totalRecords, totalMoods, totalWishes, completedWishes, avgMood, annCount, startDateRow] = await Promise.all([
