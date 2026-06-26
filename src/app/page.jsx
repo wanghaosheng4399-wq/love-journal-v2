@@ -1,5 +1,11 @@
-﻿import App from "../App"
+﻿"use client";
 
-export default function Home() {
-  return <App />
+import dynamic from "next/dynamic";
+
+const App = dynamic(() => import("../App"), {
+  ssr: false,
+});
+
+export default function Page() {
+  return <App />;
 }
