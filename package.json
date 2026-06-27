@@ -1,7 +1,8 @@
 {
-  "name": "love-journal",
+  "name": "love-journal-v2",
   "version": "1.0.0",
   "private": true,
+  "description": "A sweet glassmorphism love journal built with Next.js and Neon Postgres.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -14,6 +15,6 @@
     "react-dom": "^19.0.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=18.18"
   }
 }

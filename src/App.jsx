@@ -1,367 +1,1114 @@
-﻿"use client";
-import { useState, useEffect } from 'react'
+"use client"
 
-const THEMES = {
-  pink: { primary: '#ff6b9d', bg: '#fff5f8', card: '#fff', text: '#3d2c35', border: '#ffe0eb', gradient: 'linear-gradient(135deg, #ff6b9d, #c44dff)', shadow: 'rgba(255,107,157,0.15)' },
-  blue: { primary: '#5b9bd5', bg: '#f0f7ff', card: '#fff', text: '#2c3d50', border: '#d4e8f7', gradient: 'linear-gradient(135deg, #5b9bd5, #7dd3fc)', shadow: 'rgba(91,155,213,0.15)' },
-  purple: { primary: '#a855f7', bg: '#faf5ff', card: '#fff', text: '#3b2050', border: '#e9d5ff', gradient: 'linear-gradient(135deg, #a855f7, #ec4899)', shadow: 'rgba(168,85,247,0.15)' },
-  gold: { primary: '#d4a056', bg: '#fffaf0', card: '#fff', text: '#3d3020', border: '#f0dcc0', gradient: 'linear-gradient(135deg, #d4a056, #e8845a)', shadow: 'rgba(212,160,86,0.15)' },
+import { useEffect, useMemo, useRef, useState } from "react"
+
+const DAY = 24 * 60 * 60 * 1000
+
+const views = [
+  { key: "home", label: "首页" },
+  { key: "timeline", label: "时光" },
+  { key: "anniversaries", label: "纪念日" },
+  { key: "mood", label: "心情" },
+  { key: "wishes", label: "愿望" },
+  { key: "letters", label: "情书" },
+]
+
+const recordTypes = {
+  all: "全部",
+  daily: "日常",
+  date: "约会",
+  travel: "旅行",
+  special: "特别",
 }
 
-const TYPE_LABELS = { date: '💕 约会', daily: '🏠 日常', special: '🎉 特别', travel: '✈️ 旅行' }
-const MOOD_EMOJIS = ['', '😢', '😐', '🙂', '😊', '😍']
-const PRI_LABELS = { high: '⭐ 重要', medium: '🌙 普通', low: '☁️ 慢慢来' }
+const moodLabels = {
+  1: "低落",
+  2: "想念",
+  3: "平稳",
+  4: "开心",
+  5: "心动",
+}
 
-async function apiCall(method, path, body) {
-  const opts = { method, headers: { 'Content-Type': 'application/json' } }
-  if (body) opts.body = JSON.stringify(body)
-  const res = await fetch(path, opts)
-  return res.json()
+const priorityLabels = {
+  high: "优先",
+  medium: "普通",
+  low: "以后",
+}
+
+const emptyStats = {
+  daysTogether: 0,
+  totalRecords: 0,
+  favoriteRecords: 0,
+  totalMoods: 0,
+  totalWishes: 0,
+  completedWishes: 0,
+  avgMood: "-",
+  anniversaries: 0,
+  totalLetters: 0,
+}
+
+function todayISO() {
+  return new Date().toISOString().slice(0, 10)
+}
+
+function emptyRecord() {
+  return {
+    date: todayISO(),
+    type: "date",
+    title: "",
+    content: "",
+    location: "",
+    mood: 4,
+    photo_url: "",
+    tags: "",
+    is_favorite: false,
+  }
+}
+
+function emptyAnniversary() {
+  return { name: "", date: todayISO(), icon: "♥" }
+}
+
+function emptyMood() {
+  return { date: todayISO(), mood: 4, note: "" }
+}
+
+function emptyWish() {
+  return { content: "", priority: "medium", target_date: "" }
+}
+
+function emptyLetter() {
+  return { title: "", content: "", visible_on: todayISO() }
+}
+
+async function apiJson(path, options = {}) {
+  const response = await fetch(path, {
+    cache: "no-store",
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(data.error || "请求失败")
+  return data
+}
+
+function formatDate(dateString) {
+  if (!dateString) return "未设置"
+  const date = new Date(`${dateString}T00:00:00`)
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    weekday: "short",
+  }).format(date)
+}
+
+function clampDate(date) {
+  const next = new Date(date)
+  next.setHours(0, 0, 0, 0)
+  return next
+}
+
+function getAnniversaryTiming(dateString) {
+  const original = clampDate(new Date(`${dateString}T00:00:00`))
+  const today = clampDate(new Date())
+  const passedDays = Math.floor((today.getTime() - original.getTime()) / DAY) + 1
+
+  let nextDate = new Date(today.getFullYear(), original.getMonth(), original.getDate())
+  if (nextDate < today) {
+    nextDate = new Date(today.getFullYear() + 1, original.getMonth(), original.getDate())
+  }
+  if (original > today) {
+    nextDate = original
+  }
+
+  const daysUntil = Math.ceil((nextDate.getTime() - today.getTime()) / DAY)
+  const yearCount = Math.max(0, nextDate.getFullYear() - original.getFullYear())
+
+  return {
+    passedDays: Math.max(0, passedDays),
+    daysUntil,
+    nextDate: nextDate.toISOString().slice(0, 10),
+    yearCount,
+    countdownText: daysUntil === 0 ? "今天" : `${daysUntil} 天`,
+  }
 }
 
 export default function App() {
-  const [tab, setTab] = useState('timeline')
-  const [themeName, setThemeName] = useState(localStorage.getItem('lj-theme') || 'pink')
-  const [partnerName, setPartnerName] = useState(localStorage.getItem('lj-name') || '')
-  const [startDate, setStartDate] = useState(localStorage.getItem('lj-start') || '')
+  const shellRef = useRef(null)
+  const workspaceRef = useRef(null)
+  const [activeView, setActiveView] = useState("home")
   const [records, setRecords] = useState([])
   const [anniversaries, setAnniversaries] = useState([])
   const [moods, setMoods] = useState([])
   const [wishes, setWishes] = useState([])
-  const [stats, setStats] = useState(null)
-  const [search, setSearch] = useState('')
-  const [filterType, setFilterType] = useState('all')
-  const [loading, setLoading] = useState(false)
-  const [showRec, setShowRec] = useState(false)
-  const [showAnn, setShowAnn] = useState(false)
-  const [showMood, setShowMood] = useState(false)
-  const [showWish, setShowWish] = useState(false)
+  const [letters, setLetters] = useState([])
+  const [stats, setStats] = useState(emptyStats)
+  const [dataMode, setDataMode] = useState("checking")
+  const [loading, setLoading] = useState(true)
+  const [notice, setNotice] = useState("")
+  const [modal, setModal] = useState(null)
+  const [search, setSearch] = useState("")
+  const [typeFilter, setTypeFilter] = useState("all")
 
-  const [rf, setRf] = useState({ date: new Date().toISOString().split('T')[0], type: 'date', title: '', content: '', location: '', mood: 4 })
-  const [af, setAf] = useState({ name: '', date: '', icon: '\u2764\uFE0F' })
-  const [mf, setMf] = useState({ date: new Date().toISOString().split('T')[0], mood: 4, note: '' })
-  const [wf, setWf] = useState({ content: '', priority: 'medium' })
+  const [recordForm, setRecordForm] = useState(emptyRecord)
+  const [anniversaryForm, setAnniversaryForm] = useState(emptyAnniversary)
+  const [moodForm, setMoodForm] = useState(emptyMood)
+  const [wishForm, setWishForm] = useState(emptyWish)
+  const [letterForm, setLetterForm] = useState(emptyLetter)
 
-  const ct = THEMES[themeName] || THEMES.pink
+  useEffect(() => {
+    const hash = window.location.hash.replace("#", "")
+    if (views.some((view) => view.key === hash)) setActiveView(hash)
+    loadData()
 
-  useEffect(() => { loadData() }, [])
+    const onHashChange = () => {
+      const nextHash = window.location.hash.replace("#", "")
+      if (views.some((view) => view.key === nextHash)) setActiveView(nextHash)
+    }
+    window.addEventListener("hashchange", onHashChange)
+    return () => window.removeEventListener("hashchange", onHashChange)
+  }, [])
+
+  useEffect(() => {
+    if (!notice) return
+    const timer = window.setTimeout(() => setNotice(""), 3600)
+    return () => window.clearTimeout(timer)
+  }, [notice])
 
   async function loadData() {
     setLoading(true)
     try {
-      const [r, a, m, w, s] = await Promise.all([
-        apiCall('GET', '/api/records'),
-        apiCall('GET', '/api/anniversaries'),
-        apiCall('GET', '/api/moods'),
-        apiCall('GET', '/api/wishes'),
-        apiCall('GET', '/api/stats'),
+      const health = await apiJson("/api/health")
+      if (!health.database) {
+        setDataMode("offline")
+        setRecords([])
+        setAnniversaries([])
+        setMoods([])
+        setWishes([])
+        setLetters([])
+        setStats(emptyStats)
+        setNotice("未连接 Neon，请先配置 DATABASE_URL")
+        return
+      }
+
+      const [nextRecords, nextAnniversaries, nextMoods, nextWishes, nextLetters, nextStats] = await Promise.all([
+        apiJson("/api/records"),
+        apiJson("/api/anniversaries"),
+        apiJson("/api/moods"),
+        apiJson("/api/wishes"),
+        apiJson("/api/letters"),
+        apiJson("/api/stats"),
       ])
-      setRecords(Array.isArray(r) ? r : [])
-      setAnniversaries(Array.isArray(a) ? a : [])
-      setMoods(Array.isArray(m) ? m : [])
-      setWishes(Array.isArray(w) ? w : [])
-      setStats(s || {})
-    } catch (e) { console.error(e) }
-    finally { setLoading(false) }
-  }
 
-  const filtered = records.filter(r => {
-    if (filterType !== 'all' && r.type !== filterType) return false
-    if (search && !r.title.toLowerCase().includes(search.toLowerCase()) && !(r.content || '').toLowerCase().includes(search.toLowerCase())) return false
-    return true
-  })
-
-  const countdownItems = anniversaries.map(a => {
-    const diff = Math.floor((Date.now() - new Date(a.date + 'T00:00:00').getTime()) / 86400000)
-    const years = Math.floor(diff / 365), rem = diff % 365
-    return { ...a, text: years > 0 ? years + ' 年 ' + rem + ' 天' : diff + ' 天' }
-  }).sort((a, b) => a.date.localeCompare(b.date))
-
-  const moodCalDays = (() => {
-    const now = new Date(), year = now.getFullYear(), month = now.getMonth()
-    const firstDay = new Date(year, month, 1).getDay(), dim = new Date(year, month + 1, 0).getDate()
-    const wd = ['日', '一', '二', '三', '四', '五', '六']
-    const result = wd.map(d => ({ label: d, isHeader: true }))
-    for (let i = 0; i < firstDay; i++) result.push({ label: '' })
-    for (let d = 1; d <= dim; d++) {
-      const ds = year + '-' + String(month + 1).padStart(2, '0') + '-' + String(d).padStart(2, '0')
-      const mr = moods.find(m => m.date === ds)
-      result.push({ label: d, emoji: mr ? MOOD_EMOJIS[mr.mood] : '' })
+      setRecords(Array.isArray(nextRecords) ? nextRecords : [])
+      setAnniversaries(Array.isArray(nextAnniversaries) ? nextAnniversaries : [])
+      setMoods(Array.isArray(nextMoods) ? nextMoods : [])
+      setWishes(Array.isArray(nextWishes) ? nextWishes : [])
+      setLetters(Array.isArray(nextLetters) ? nextLetters : [])
+      setStats(nextStats || emptyStats)
+      setDataMode("live")
+    } catch (error) {
+      console.error(error)
+      setDataMode("offline")
+      setNotice(error.message || "数据库连接失败")
+    } finally {
+      setLoading(false)
     }
-    return result
-  })()
-
-  async function saveRecord() {
-    if (!rf.title) return alert('请填写标题')
-    await apiCall('POST', '/api/records', rf)
-    setShowRec(false)
-    setRf({ date: new Date().toISOString().split('T')[0], type: 'date', title: '', content: '', location: '', mood: 4 })
-    loadData()
   }
 
-  async function deleteRecord(id) { if (!confirm('删除？')) return; await apiCall('DELETE', '/api/records/' + id); loadData() }
-  async function saveAnniversary() { if (!af.name || !af.date) return alert('请填写完整'); await apiCall('POST', '/api/anniversaries', af); setShowAnn(false); setAf({ name: '', date: '', icon: '\u2764\uFE0F' }); loadData() }
-  async function deleteAnniversary(id) { await apiCall('DELETE', '/api/anniversaries/' + id); loadData() }
-  async function saveMood() { if (!mf.date) return alert('请选择日期'); await apiCall('POST', '/api/moods', mf); setShowMood(false); setMf({ date: new Date().toISOString().split('T')[0], mood: 4, note: '' }); loadData() }
-  async function saveWish() { if (!wf.content) return alert('请填写愿望'); await apiCall('POST', '/api/wishes', wf); setShowWish(false); setWf({ content: '', priority: 'medium' }); loadData() }
-  async function toggleWish(w) { await apiCall('PUT', '/api/wishes/' + w.id, { ...w, completed: !w.completed }); loadData() }
-  async function deleteWish(id) { await apiCall('DELETE', '/api/wishes/' + id); loadData() }
-
-  function setTheme(t) { setThemeName(t); localStorage.setItem('lj-theme', t) }
-  function saveName() { localStorage.setItem('lj-name', partnerName) }
-  function saveStart() { localStorage.setItem('lj-start', startDate); loadData() }
-
-  async function exportData() {
-    const [r, a, m, w, s] = await Promise.all([apiCall('GET', '/api/records'), apiCall('GET', '/api/anniversaries'), apiCall('GET', '/api/moods'), apiCall('GET', '/api/wishes'), apiCall('GET', '/api/stats')])
-    const blob = new Blob([JSON.stringify({ records: r, anniversaries: a, moods: m, wishes: w, stats: s }, null, 2)])
-    const el = document.createElement('a'); el.href = URL.createObjectURL(blob); el.download = 'love-journal-' + new Date().toISOString().split('T')[0] + '.json'; el.click()
+  function handlePointerMove(event) {
+    const node = shellRef.current
+    if (!node) return
+    node.style.setProperty("--pointer-x", `${event.clientX}px`)
+    node.style.setProperty("--pointer-y", `${event.clientY}px`)
   }
 
-  function fmtDate(ds) {
-    const d = new Date(ds + 'T00:00:00')
-    const wd = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-    return d.getFullYear() + '年' + (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + wd[d.getDay()]
+  function goToView(viewKey) {
+    setActiveView(viewKey)
+    window.history.pushState(null, "", `#${viewKey}`)
+    window.requestAnimationFrame(() => {
+      const target = viewKey === "home" ? document.querySelector(".hero-section") : workspaceRef.current
+      target?.scrollIntoView({ behavior: "smooth", block: "start" })
+    })
   }
 
-  const gs = { '--p': ct.primary, '--bg': ct.bg, '--card': ct.card, '--text': ct.text, '--border': ct.border, '--grad': ct.gradient, '--sh': ct.shadow }
+  function ensureLive() {
+    if (dataMode === "live") return true
+    setNotice("还没有连接数据库，配置 Neon DATABASE_URL 后才能保存")
+    return false
+  }
+
+  const filteredRecords = useMemo(() => {
+    const keyword = search.trim().toLowerCase()
+    return records
+      .filter((record) => (typeFilter === "all" ? true : record.type === typeFilter))
+      .filter((record) => {
+        if (!keyword) return true
+        return [record.title, record.content, record.location, record.tags]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(keyword)
+      })
+      .sort((a, b) => `${b.date}${b.id}`.localeCompare(`${a.date}${a.id}`))
+  }, [records, search, typeFilter])
+
+  const featuredRecord = records.find((record) => record.is_favorite) || records[0]
+  const latestLetter = letters[0]
+  const openWishes = wishes.filter((wish) => !wish.completed)
+
+  function openCreate(type) {
+    setModal({ type, mode: "create", item: null })
+    if (type === "record") setRecordForm(emptyRecord())
+    if (type === "anniversary") setAnniversaryForm(emptyAnniversary())
+    if (type === "mood") setMoodForm(emptyMood())
+    if (type === "wish") setWishForm(emptyWish())
+    if (type === "letter") setLetterForm(emptyLetter())
+  }
+
+  function openEdit(type, item) {
+    setModal({ type, mode: "edit", item })
+    if (type === "record") setRecordForm({ ...emptyRecord(), ...item, is_favorite: Boolean(item.is_favorite) })
+    if (type === "anniversary") setAnniversaryForm({ ...emptyAnniversary(), ...item })
+    if (type === "mood") setMoodForm({ ...emptyMood(), ...item })
+    if (type === "wish") setWishForm({ ...emptyWish(), ...item })
+    if (type === "letter") setLetterForm({ ...emptyLetter(), ...item })
+  }
+
+  function closeModal() {
+    setModal(null)
+  }
+
+  async function saveEntity(event, collection, payload, requiredMessage) {
+    event.preventDefault()
+    if (requiredMessage) {
+      setNotice(requiredMessage)
+      return
+    }
+    if (!ensureLive()) return
+
+    const isEdit = modal?.mode === "edit" && modal.item?.id
+    const path = isEdit ? `/api/${collection}/${modal.item.id}` : `/api/${collection}`
+    const method = isEdit ? "PUT" : "POST"
+
+    try {
+      await apiJson(path, { method, body: JSON.stringify(payload) })
+      closeModal()
+      await loadData()
+      setNotice(isEdit ? "修改已保存" : "新增已保存")
+    } catch (error) {
+      console.error(error)
+      setNotice(error.message || "保存失败")
+    }
+  }
+
+  async function saveRecord(event) {
+    const payload = {
+      ...recordForm,
+      title: recordForm.title.trim(),
+      content: recordForm.content.trim(),
+      location: recordForm.location.trim(),
+      tags: recordForm.tags.trim(),
+      mood: Number(recordForm.mood || 3),
+      is_favorite: Boolean(recordForm.is_favorite),
+    }
+    await saveEntity(event, "records", payload, payload.title ? "" : "标题不能为空")
+  }
+
+  async function saveAnniversary(event) {
+    const payload = {
+      ...anniversaryForm,
+      name: anniversaryForm.name.trim(),
+      icon: anniversaryForm.icon.trim() || "♥",
+    }
+    await saveEntity(event, "anniversaries", payload, payload.name && payload.date ? "" : "纪念日名称和日期不能为空")
+  }
+
+  async function saveMood(event) {
+    const payload = {
+      ...moodForm,
+      mood: Number(moodForm.mood || 3),
+      note: moodForm.note.trim(),
+    }
+    await saveEntity(event, "moods", payload, payload.date ? "" : "日期不能为空")
+  }
+
+  async function saveWish(event) {
+    const payload = {
+      ...wishForm,
+      content: wishForm.content.trim(),
+      completed: Boolean(wishForm.completed),
+    }
+    await saveEntity(event, "wishes", payload, payload.content ? "" : "愿望不能为空")
+  }
+
+  async function saveLetter(event) {
+    const payload = {
+      ...letterForm,
+      title: letterForm.title.trim(),
+      content: letterForm.content.trim(),
+    }
+    await saveEntity(event, "letters", payload, payload.title && payload.content ? "" : "情书标题和内容不能为空")
+  }
+
+  async function deleteItem(collection, id) {
+    if (!ensureLive()) return
+    if (!window.confirm("确定删除这条内容吗？")) return
+
+    try {
+      await apiJson(`/api/${collection}/${id}`, { method: "DELETE" })
+      await loadData()
+      setNotice("已删除")
+    } catch (error) {
+      console.error(error)
+      setNotice(error.message || "删除失败")
+    }
+  }
+
+  async function toggleWish(wish) {
+    if (!ensureLive()) return
+    try {
+      await apiJson(`/api/wishes/${wish.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ ...wish, completed: !wish.completed }),
+      })
+      await loadData()
+    } catch (error) {
+      console.error(error)
+      setNotice(error.message || "更新愿望失败")
+    }
+  }
 
   return (
-    <div style={{ ...gs, minHeight: '100vh', background: 'var(--bg)', color: 'var(--text)' }}>
-      <header style={{ position: 'sticky', top: 0, zIndex: 100, background: 'var(--card)', borderBottom: '2px solid var(--border)', boxShadow: '0 2px 20px var(--sh)' }}>
-        <div style={{ maxWidth: 1200, margin: '0 auto', padding: '12px 24px', display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-          <h1 style={{ fontSize: 1.2, fontWeight: 700, background: 'var(--grad)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
-            {partnerName ? '💕 ' + partnerName + ' 的' : '💕 '}恋爱日记
-          </h1>
-          <nav style={{ display: 'flex', gap: 4, flexWrap: 'wrap', flex: 1 }}>
-            {['timeline', 'anniversaries', 'mood', 'wishes', 'stats', 'settings'].map(t => (
-              <button key={t} onClick={() => setTab(t)} style={{
-                padding: '8px 14px', borderRadius: 20, border: 'none',
-                background: tab === t ? 'var(--grad)' : 'transparent',
-                color: tab === t ? '#fff' : 'var(--text)', opacity: tab === t ? 1 : 0.7,
-                fontSize: 0.85, fontWeight: 500, cursor: 'pointer', transition: 'all 0.3s'
-              }}>
-                {{ timeline: '📅 时间线', anniversaries: '⏳ 纪念日', mood: '😊 心情', wishes: '🌟 愿望', stats: '📊 数据', settings: '⚙️ 设置' }[t]}
-              </button>
-            ))}
-          </nav>
-          <button onClick={() => setShowRec(true)} style={{ padding: '10px 20px', border: 'none', borderRadius: 25, background: 'var(--grad)', color: '#fff', fontSize: 0.9, fontWeight: 600, cursor: 'pointer' }}>＋ 添加</button>
-        </div>
+    <div ref={shellRef} className="app-shell" data-theme="rose" onPointerMove={handlePointerMove}>
+      <div className="scene-bg" aria-hidden="true" />
+      <div className="grain-layer" aria-hidden="true" />
+
+      <header className="topbar glass-panel">
+        <button className="brand-mark" type="button" onClick={() => goToView("home")}>
+          <span className="brand-glyph">♥</span>
+          <span>恋爱日记</span>
+        </button>
+
+        <nav className="nav-tabs" aria-label="主导航">
+          {views.map((view) => (
+            <button
+              key={view.key}
+              className={activeView === view.key ? "nav-tab is-active" : "nav-tab"}
+              type="button"
+              aria-current={activeView === view.key ? "page" : undefined}
+              onClick={() => goToView(view.key)}
+            >
+              {view.label}
+            </button>
+          ))}
+        </nav>
+
+        <button className="primary-action" type="button" onClick={() => openCreate("record")}>
+          <span>＋</span>
+          写一段
+        </button>
       </header>
 
-      <main style={{ maxWidth: 1200, margin: '0 auto', padding: 24 }}>
-        {tab === 'timeline' && (
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
-              <h2 style={{ fontSize: 1.4, fontWeight: 700 }}>📅 每日时光</h2>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <input value={search} onChange={e => setSearch(e.target.value)} placeholder="搜索..." style={{ padding: '8px 14px', border: '2px solid var(--border)', borderRadius: 10, fontSize: 0.85, background: 'var(--card)', color: 'var(--text)' }} />
-                <select value={filterType} onChange={e => setFilterType(e.target.value)} style={{ padding: '8px 14px', border: '2px solid var(--border)', borderRadius: 10, fontSize: 0.85, background: 'var(--card)', color: 'var(--text)' }}>
-                  <option value="all">全部</option>
-                  <option value="date">💕 约会</option>
-                  <option value="daily">🏠 日常</option>
-                  <option value="special">🎉 特别</option>
-                  <option value="travel">✈️ 旅行</option>
-                </select>
-              </div>
-            </div>
-            {loading ? <p style={{ textAlign: 'center', padding: 40 }}>加载中...</p> :
-             filtered.length === 0 ? <p style={{ textAlign: 'center', padding: 60, opacity: 0.6 }}>还没有记录，点击「＋ 添加」开始书写 💑</p> :
-             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-               {filtered.map(r => (
-                 <div key={r.id} style={{ background: 'var(--card)', borderRadius: 16, padding: '18px 20px', borderLeft: '4px solid var(--p)', boxShadow: '0 4px 15px var(--sh)' }}>
-                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                     <span style={{ fontSize: 0.75, fontWeight: 700, color: 'var(--p)' }}>{fmtDate(r.date)} · {TYPE_LABELS[r.type] || r.type}</span>
-                     <button onClick={() => deleteRecord(r.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', opacity: 0.5 }}>🗑️</button>
-                   </div>
-                   <div style={{ fontSize: 1.05, fontWeight: 600, marginBottom: 6 }}>{r.title}</div>
-                   {r.content && <div style={{ fontSize: 0.9, lineHeight: 1.7, whiteSpace: 'pre-wrap', marginBottom: 6 }}>{r.content}</div>}
-                   {r.location && <div style={{ fontSize: 0.8, opacity: 0.7 }}>📍 {r.location}</div>}
-                   {r.mood && <div style={{ fontSize: 1.2, marginTop: 6 }}>{MOOD_EMOJIS[r.mood]}</div>}
-                 </div>
-               ))}
-             </div>
-            }
-          </div>
-        )}
+      <main className="page-main">
+        <Hero
+          stats={stats}
+          featuredRecord={featuredRecord}
+          dataMode={dataMode}
+          onCreate={() => openCreate("record")}
+          onJump={goToView}
+        />
 
-        {tab === 'anniversaries' && (
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 20 }}>
-              <h2 style={{ fontSize: 1.4, fontWeight: 700 }}>⏳ 纪念日</h2>
-              <button onClick={() => setShowAnn(true)} style={{ padding: '8px 16px', border: '2px solid var(--p)', borderRadius: 20, background: 'transparent', color: 'var(--p)', fontSize: 0.8, fontWeight: 600, cursor: 'pointer' }}>＋ 添加</button>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: 16 }}>
-              {countdownItems.map(a => (
-                <div key={a.id} style={{ background: 'var(--card)', borderRadius: 16, padding: 24, textAlign: 'center', boxShadow: '0 4px 15px var(--sh)', position: 'relative' }}>
-                  <button onClick={() => deleteAnniversary(a.id)} style={{ position: 'absolute', top: 8, right: 8, background: 'none', border: 'none', cursor: 'pointer' }}>✕</button>
-                  <div style={{ fontSize: 2.5, marginBottom: 8 }}>{a.icon}</div>
-                  <div style={{ fontSize: 1.1, fontWeight: 600, marginBottom: 4 }}>{a.name}</div>
-                  <div style={{ fontSize: 0.8, opacity: 0.6, marginBottom: 12 }}>{fmtDate(a.date)}</div>
-                  <div style={{ fontSize: 1.8, fontWeight: 700, background: 'var(--grad)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>{a.text}</div>
-                  <div style={{ fontSize: 0.8, opacity: 0.6, marginTop: 4 }}>已经一起走过的日子</div>
-                </div>
-              ))}
-              {countdownItems.length === 0 && <p style={{ textAlign: 'center', padding: 40, opacity: 0.6 }}>还没有纪念日 ⏳</p>}
-            </div>
-          </div>
-        )}
+        <section className="workspace glass-panel" ref={workspaceRef} id={activeView}>
+          <WorkspaceHeader activeView={activeView} loading={loading} dataMode={dataMode} notice={notice} />
+          {dataMode === "offline" && <DatabaseRequired />}
 
-        {tab === 'mood' && (
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 20 }}>
-              <h2 style={{ fontSize: 1.4, fontWeight: 700 }}>😊 心情日记</h2>
-              <button onClick={() => setShowMood(true)} style={{ padding: '8px 16px', border: '2px solid var(--p)', borderRadius: 20, background: 'transparent', color: 'var(--p)', fontSize: 0.8, fontWeight: 600, cursor: 'pointer' }}>＋ 记录</button>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4, marginBottom: 20 }}>
-              {moodCalDays.map((d, i) => (
-                <div key={i} style={{ aspectRatio: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8, fontSize: 0.85, background: d.isHeader ? 'var(--p)' : 'var(--card)', color: d.isHeader ? '#fff' : 'var(--text)', border: d.isHeader ? 'none' : '1px solid var(--border)', position: 'relative', minWidth: 0 }}>
-                  {d.label}
-                  {d.emoji && <span style={{ position: 'absolute', bottom: 2, fontSize: 0.65 }}>{d.emoji}</span>}
-                </div>
-              ))}
-            </div>
-            {moods.slice(0, 10).map(m => (
-              <div key={m.id} style={{ background: 'var(--card)', borderRadius: 10, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8, boxShadow: '0 2px 8px var(--sh)' }}>
-                <span style={{ fontSize: 0.8, opacity: 0.6, minWidth: 80 }}>{m.date}</span>
-                <span style={{ fontSize: 1.3 }}>{MOOD_EMOJIS[m.mood]}</span>
-                {m.note && <span style={{ fontSize: 0.85 }}>{m.note}</span>}
-              </div>
-            ))}
-          </div>
-        )}
+          {activeView === "home" && (
+            <Overview
+              records={records}
+              wishes={openWishes}
+              letters={letters}
+              moods={moods}
+              stats={stats}
+              featuredRecord={featuredRecord}
+              latestLetter={latestLetter}
+              onOpen={goToView}
+              onCreate={openCreate}
+            />
+          )}
 
-        {tab === 'wishes' && (
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 20 }}>
-              <h2 style={{ fontSize: 1.4, fontWeight: 700 }}>🌟 愿望清单</h2>
-              <button onClick={() => setShowWish(true)} style={{ padding: '8px 16px', border: '2px solid var(--p)', borderRadius: 20, background: 'transparent', color: 'var(--p)', fontSize: 0.8, fontWeight: 600, cursor: 'pointer' }}>＋ 添加</button>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {wishes.map(w => (
-                <div key={w.id} style={{ background: 'var(--card)', borderRadius: 10, padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 12, boxShadow: '0 2px 10px var(--sh)', opacity: w.completed ? 0.5 : 1, textDecoration: w.completed ? 'line-through' : 'none' }}>
-                  <div onClick={() => toggleWish(w)} style={{ width: 24, height: 24, borderRadius: '50%', border: '2px solid var(--p)', cursor: 'pointer', flexShrink: 0, background: w.completed ? 'var(--p)' : 'transparent' }} />
-                  <span style={{ flex: 1, fontSize: 0.95 }}>{w.content}</span>
-                  <span style={{ fontSize: 0.7, padding: '2px 8px', borderRadius: 10, background: w.priority === 'high' ? '#ffe0e0' : w.priority === 'medium' ? '#fff3e0' : '#e8f5e9', color: w.priority === 'high' ? '#e74c3c' : w.priority === 'medium' ? '#f39c12' : '#27ae60' }}>{PRI_LABELS[w.priority]}</span>
-                  <button onClick={() => deleteWish(w.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', opacity: 0.4 }}>✕</button>
-                </div>
-              ))}
-              {wishes.length === 0 && <p style={{ textAlign: 'center', padding: 40, opacity: 0.6 }}>还没有愿望 🌟</p>}
-            </div>
-          </div>
-        )}
+          {activeView === "timeline" && (
+            <TimelineView
+              records={filteredRecords}
+              search={search}
+              setSearch={setSearch}
+              typeFilter={typeFilter}
+              setTypeFilter={setTypeFilter}
+              onCreate={() => openCreate("record")}
+              onEdit={(item) => openEdit("record", item)}
+              onDelete={(id) => deleteItem("records", id)}
+            />
+          )}
 
-        {tab === 'stats' && (
-          <div>
-            <h2 style={{ fontSize: 1.4, fontWeight: 700, marginBottom: 20 }}>📊 我们的数据</h2>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 14 }}>
-              {[
-                { num: stats?.daysTogether || '-', label: '在一起的天数' },
-                { num: stats?.totalRecords || 0, label: '记录总数' },
-                { num: stats?.totalMoods || 0, label: '心情记录' },
-                { num: stats?.completedWishes || 0 + '/' + stats?.totalWishes || 0, label: '愿望完成' },
-                { num: stats?.avgMood || '-', label: '平均心情' },
-                { num: anniversaries.length, label: '纪念日' },
-              ].map((s, i) => (
-                <div key={i} style={{ background: 'var(--card)', borderRadius: 16, padding: 24, textAlign: 'center', border: '2px solid var(--border)', boxShadow: '0 4px 15px var(--sh)' }}>
-                  <div style={{ fontSize: 2.2, fontWeight: 700, background: 'var(--grad)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>{s.num}</div>
-                  <div style={{ fontSize: 0.8, opacity: 0.6, marginTop: 4 }}>{s.label}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+          {activeView === "anniversaries" && (
+            <AnniversaryView
+              anniversaries={anniversaries}
+              onCreate={() => openCreate("anniversary")}
+              onEdit={(item) => openEdit("anniversary", item)}
+              onDelete={(id) => deleteItem("anniversaries", id)}
+            />
+          )}
 
-        {tab === 'settings' && (
-          <div>
-            <h2 style={{ fontSize: 1.4, fontWeight: 700, marginBottom: 20 }}>⚙️ 设置</h2>
-            <div style={{ background: 'var(--card)', borderRadius: 16, padding: 24, border: '2px solid var(--border)', boxShadow: '0 4px 15px var(--sh)', maxWidth: 500 }}>
-              <div style={{ marginBottom: 20 }}>
-                <label style={{ display: 'block', fontWeight: 600, marginBottom: 8, fontSize: 0.9 }}>对方名字</label>
-                <input value={partnerName} onChange={e => setPartnerName(e.target.value)} onBlur={saveName} placeholder="输入TA的名字" style={{ width: '100%', padding: '10px 14px', border: '2px solid var(--border)', borderRadius: 10, fontSize: 0.9, background: 'var(--bg)', color: 'var(--text)', outline: 'none' }} />
-              </div>
-              <div style={{ marginBottom: 20 }}>
-                <label style={{ display: 'block', fontWeight: 600, marginBottom: 8, fontSize: 0.9 }}>在一起的日子</label>
-                <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} onBlur={saveStart} style={{ width: '100%', padding: '10px 14px', border: '2px solid var(--border)', borderRadius: 10, fontSize: 0.9, background: 'var(--bg)', color: 'var(--text)', outline: 'none' }} />
-              </div>
-              <div style={{ marginBottom: 20 }}>
-                <label style={{ display: 'block', fontWeight: 600, marginBottom: 8, fontSize: 0.9 }}>主题颜色</label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  {['pink', 'blue', 'purple', 'gold'].map(t => (
-                    <button key={t} onClick={() => setTheme(t)} style={{
-                      width: 44, height: 44, borderRadius: '50%', border: themeName === t ? '3px solid var(--text)' : '3px solid transparent',
-                      background: THEMES[t].gradient, cursor: 'pointer', fontSize: 1.2, transition: 'transform 0.2s'
-                    }}>{t === 'pink' ? '🩷' : t === 'blue' ? '🩵' : t === 'purple' ? '💜' : '🤎'}</button>
-                  ))}
-                </div>
-              </div>
-              <div>
-                <label style={{ display: 'block', fontWeight: 600, marginBottom: 8, fontSize: 0.9 }}>数据管理</label>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                  <button onClick={exportData} style={{ padding: '8px 16px', border: '2px solid var(--p)', borderRadius: 20, background: 'transparent', color: 'var(--p)', fontSize: 0.8, fontWeight: 600, cursor: 'pointer' }}>📤 导出数据</button>
-                  <button onClick={() => { if (confirm('确定清除本地缓存？')) { localStorage.clear(); location.reload() } }} style={{ padding: '8px 16px', border: '2px solid #e74c3c', borderRadius: 20, background: 'transparent', color: '#e74c3c', fontSize: 0.8, fontWeight: 600, cursor: 'pointer' }}>🗑️ 清除缓存</button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
+          {activeView === "mood" && (
+            <MoodView
+              moods={moods}
+              onCreate={() => openCreate("mood")}
+              onEdit={(item) => openEdit("mood", item)}
+              onDelete={(id) => deleteItem("moods", id)}
+            />
+          )}
+
+          {activeView === "wishes" && (
+            <WishView
+              wishes={wishes}
+              onCreate={() => openCreate("wish")}
+              onEdit={(item) => openEdit("wish", item)}
+              onToggle={toggleWish}
+              onDelete={(id) => deleteItem("wishes", id)}
+            />
+          )}
+
+          {activeView === "letters" && (
+            <LetterView
+              letters={letters}
+              onCreate={() => openCreate("letter")}
+              onEdit={(item) => openEdit("letter", item)}
+              onDelete={(id) => deleteItem("letters", id)}
+            />
+          )}
+        </section>
       </main>
 
-      {/* Modals */}
-      {showRec && <Modal onClose={() => setShowRec(false)} title="✨ 添加记录" theme={ct}>
-        <div style={{ marginBottom: 14 }}><label style={{ display: 'block', fontWeight: 600, marginBottom: 6, fontSize: 0.85 }}>日期</label><input type="date" value={rf.date} onChange={e => setRf({ ...rf, date: e.target.value })} /></div>
-        <div style={{ marginBottom: 14 }}><label style={{ display: 'block', fontWeight: 600, marginBottom: 6, fontSize: 0.85 }}>类型</label><select value={rf.type} onChange={e => setRf({ ...rf, type: e.target.value })}><option value="date">💕 约会</option><option value="daily">🏠 日常</option><option value="special">🎉 特别时刻</option><option value="travel">✈️ 旅行</option></select></div>
-        <div style={{ marginBottom: 14 }}><label style={{ display: 'block', fontWeight: 600, marginBottom: 6, fontSize: 0.85 }}>标题</label><input value={rf.title} onChange={e => setRf({ ...rf, title: e.target.value })} placeholder="今天发生了什么？" /></div>
-        <div style={{ marginBottom: 14 }}><label style={{ display: 'block', fontWeight: 600, marginBottom: 6, fontSize: 0.85 }}>内容</label><textarea value={rf.content} onChange={e => setRf({ ...rf, content: e.target.value })} rows={4} placeholder="写下更多细节..." /></div>
-        <div style={{ marginBottom: 14 }}><label style={{ display: 'block', fontWeight: 600, marginBottom: 6, fontSize: 0.85 }}>地点</label><input value={rf.location} onChange={e => setRf({ ...rf, location: e.target.value })} placeholder="在哪里？" /></div>
-        <div style={{ marginBottom: 14 }}><label style={{ display: 'block', fontWeight: 600, marginBottom: 6, fontSize: 0.85 }}>心情</label><div style={{ display: 'flex', gap: 8 }}>{MOOD_EMOJIS.map((e, i) => i > 0 && <span key={i} onClick={() => setRf({ ...rf, mood: i })} style={{ fontSize: 1.6, cursor: 'pointer', padding: 4, borderRadius: 8, background: rf.mood === i ? 'var(--bg)' : 'transparent', border: rf.mood === i ? '2px solid var(--p)' : '2px solid transparent' }}>{e}</span>)}</div></div>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
-          <button onClick={() => setShowRec(false)} style={{ padding: '10px 24px', border: '2px solid var(--border)', borderRadius: 25, background: 'transparent', color: 'var(--text)', cursor: 'pointer' }}>取消</button>
-          <button onClick={saveRecord} style={{ padding: '10px 24px', border: 'none', borderRadius: 25, background: 'var(--grad)', color: '#fff', fontWeight: 600, cursor: 'pointer' }}>保存 💾</button>
-        </div>
-      </Modal>}
+      {modal?.type === "record" && (
+        <Modal title={modal.mode === "edit" ? "编辑时光" : "新增时光"} onClose={closeModal}>
+          <RecordForm value={recordForm} setValue={setRecordForm} onSubmit={saveRecord} mode={modal.mode} />
+        </Modal>
+      )}
 
-      {showAnn && <Modal onClose={() => setShowAnn(false)} title="🎂 添加纪念日" theme={ct}>
-        <div style={{ marginBottom: 14 }}><label style={{ display: 'block', fontWeight: 600, marginBottom: 6, fontSize: 0.85 }}>名称</label><input value={af.name} onChange={e => setAf({ ...af, name: e.target.value })} placeholder="例如：第一次见面" /></div>
-        <div style={{ marginBottom: 14 }}><label style={{ display: 'block', fontWeight: 600, marginBottom: 6, fontSize: 0.85 }}>日期</label><input type="date" value={af.date} onChange={e => setAf({ ...af, date: e.target.value })} /></div>
-        <div style={{ marginBottom: 14 }}><label style={{ display: 'block', fontWeight: 600, marginBottom: 6, fontSize: 0.85 }}>图标</label><input value={af.icon} onChange={e => setAf({ ...af, icon: e.target.value })} maxLength={4} /></div>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
-          <button onClick={() => setShowAnn(false)} style={{ padding: '10px 24px', border: '2px solid var(--border)', borderRadius: 25, background: 'transparent', color: 'var(--text)', cursor: 'pointer' }}>取消</button>
-          <button onClick={saveAnniversary} style={{ padding: '10px 24px', border: 'none', borderRadius: 25, background: 'var(--grad)', color: '#fff', fontWeight: 600, cursor: 'pointer' }}>保存 💾</button>
-        </div>
-      </Modal>}
+      {modal?.type === "anniversary" && (
+        <Modal title={modal.mode === "edit" ? "编辑纪念日" : "新增纪念日"} onClose={closeModal}>
+          <AnniversaryForm value={anniversaryForm} setValue={setAnniversaryForm} onSubmit={saveAnniversary} mode={modal.mode} />
+        </Modal>
+      )}
 
-      {showMood && <Modal onClose={() => setShowMood(false)} title="😊 记录心情" theme={ct}>
-        <div style={{ marginBottom: 14 }}><label style={{ display: 'block', fontWeight: 600, marginBottom: 6, fontSize: 0.85 }}>日期</label><input type="date" value={mf.date} onChange={e => setMf({ ...mf, date: e.target.value })} /></div>
-        <div style={{ marginBottom: 14 }}><label style={{ display: 'block', fontWeight: 600, marginBottom: 6, fontSize: 0.85 }}>心情</label><div style={{ display: 'flex', gap: 8 }}>{MOOD_EMOJIS.map((e, i) => i > 0 && <span key={i} onClick={() => setMf({ ...mf, mood: i })} style={{ fontSize: 2.2, cursor: 'pointer', padding: 6, borderRadius: 12, background: mf.mood === i ? 'var(--bg)' : 'transparent', border: mf.mood === i ? '2px solid var(--p)' : '2px solid transparent' }}>{e}</span>)}</div></div>
-        <div style={{ marginBottom: 14 }}><label style={{ display: 'block', fontWeight: 600, marginBottom: 6, fontSize: 0.85 }}>想说的话</label><textarea value={mf.note} onChange={e => setMf({ ...mf, note: e.target.value })} rows={3} placeholder="今天过得怎么样？" /></div>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
-          <button onClick={() => setShowMood(false)} style={{ padding: '10px 24px', border: '2px solid var(--border)', borderRadius: 25, background: 'transparent', color: 'var(--text)', cursor: 'pointer' }}>取消</button>
-          <button onClick={saveMood} style={{ padding: '10px 24px', border: 'none', borderRadius: 25, background: 'var(--grad)', color: '#fff', fontWeight: 600, cursor: 'pointer' }}>保存 💾</button>
-        </div>
-      </Modal>}
+      {modal?.type === "mood" && (
+        <Modal title={modal.mode === "edit" ? "编辑心情" : "新增心情"} onClose={closeModal}>
+          <MoodForm value={moodForm} setValue={setMoodForm} onSubmit={saveMood} mode={modal.mode} />
+        </Modal>
+      )}
 
-      {showWish && <Modal onClose={() => setShowWish(false)} title="🌟 添加愿望" theme={ct}>
-        <div style={{ marginBottom: 14 }}><label style={{ display: 'block', fontWeight: 600, marginBottom: 6, fontSize: 0.85 }}>愿望</label><input value={wf.content} onChange={e => setWf({ ...wf, content: e.target.value })} placeholder="我们一起..." /></div>
-        <div style={{ marginBottom: 14 }}><label style={{ display: 'block', fontWeight: 600, marginBottom: 6, fontSize: 0.85 }}>优先级</label><select value={wf.priority} onChange={e => setWf({ ...wf, priority: e.target.value })}><option value="high">⭐ 很重要</option><option value="medium">🌙 普通</option><option value="low">☁️ 慢慢来</option></select></div>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
-          <button onClick={() => setShowWish(false)} style={{ padding: '10px 24px', border: '2px solid var(--border)', borderRadius: 25, background: 'transparent', color: 'var(--text)', cursor: 'pointer' }}>取消</button>
-          <button onClick={saveWish} style={{ padding: '10px 24px', border: 'none', borderRadius: 25, background: 'var(--grad)', color: '#fff', fontWeight: 600, cursor: 'pointer' }}>保存 💾</button>
-        </div>
-      </Modal>}
+      {modal?.type === "wish" && (
+        <Modal title={modal.mode === "edit" ? "编辑愿望" : "新增愿望"} onClose={closeModal}>
+          <WishForm value={wishForm} setValue={setWishForm} onSubmit={saveWish} mode={modal.mode} />
+        </Modal>
+      )}
+
+      {modal?.type === "letter" && (
+        <Modal title={modal.mode === "edit" ? "编辑情书" : "新增情书"} onClose={closeModal}>
+          <LetterForm value={letterForm} setValue={setLetterForm} onSubmit={saveLetter} mode={modal.mode} />
+        </Modal>
+      )}
     </div>
   )
 }
 
-function Modal({ children, onClose, title, theme }) {
+function Hero({ stats, featuredRecord, dataMode, onCreate, onJump }) {
   return (
-    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(4px)' }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: 'var(--card)', borderRadius: 16, width: '90%', maxWidth: 480, border: '2px solid ' + theme.primary, boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
-        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h3 style={{ fontSize: 1.05 }}>{title}</h3>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 1.2, cursor: 'pointer' }}>✕</button>
+    <section className="hero-section">
+      <div className="hero-copy">
+        <p className="kicker">LOVE JOURNAL DATABASE</p>
+        <h1>把每一天都写进同一个地方</h1>
+        <p className="hero-subtitle">内容从 Neon 数据库读取，可新增、编辑、删除。纪念日倒计时按真实日期自动计算。</p>
+        <div className="hero-actions">
+          <button className="primary-action hero-button" type="button" onClick={onCreate}>
+            <span>＋</span>
+            新增记录
+          </button>
+          <button className="ghost-action hero-button" type="button" onClick={() => onJump("anniversaries")}>
+            查看倒计时
+          </button>
         </div>
-        <div style={{ padding: 20 }}>{children}</div>
+      </div>
+
+      <div className="hero-memory glass-panel">
+        <div className="memory-photo" />
+        <div className="memory-copy">
+          <span>{dataMode === "live" ? "Neon 已连接" : "数据库未连接"}</span>
+          <h2>{featuredRecord?.title || "还没有数据库记录"}</h2>
+          <p>{featuredRecord?.content || "连接 Neon 后，在时光模块新增第一条内容，这里会自动展示最新回忆。"}</p>
+        </div>
+        <div className="hero-stat-row">
+          <MiniStat label="记录天数" value={`${stats.daysTogether || 0} 天`} />
+          <MiniStat label="回忆" value={stats.totalRecords || 0} />
+          <MiniStat label="愿望" value={`${stats.completedWishes || 0}/${stats.totalWishes || 0}`} />
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function WorkspaceHeader({ activeView, loading, dataMode, notice }) {
+  const titleMap = {
+    home: "数据总览",
+    timeline: "时光记录",
+    anniversaries: "真实倒计时",
+    mood: "心情记录",
+    wishes: "愿望清单",
+    letters: "情书盒子",
+  }
+
+  return (
+    <div className="workspace-header">
+      <div>
+        <p className="section-label">DATABASE CONTENT</p>
+        <h2>{titleMap[activeView]}</h2>
+      </div>
+      <div className="status-stack">
+        {loading && <span className="status-pill">同步中</span>}
+        <span className={dataMode === "live" ? "status-pill is-live" : "status-pill"}>{dataMode === "live" ? "云端已连接" : "未连接"}</span>
+        {notice && <span className="notice-pill">{notice}</span>}
       </div>
     </div>
   )
+}
+
+function DatabaseRequired() {
+  return (
+    <div className="db-required glass-card">
+      <strong>当前没有连接数据库</strong>
+      <p>请在 Vercel 或本地 `.env.local` 配置 `DATABASE_URL`。连接 Neon 后，本页会自动建表，所有内容都从数据库读取。</p>
+    </div>
+  )
+}
+
+function Overview({ records, wishes, moods, stats, featuredRecord, latestLetter, onOpen, onCreate }) {
+  const recentRecords = records.slice(0, 3)
+  const moodAverage = stats.avgMood === "-" ? "暂无" : `${stats.avgMood}/5`
+
+  return (
+    <div className="overview-grid">
+      <button className="overview-tile wide glass-card align-start" type="button" onClick={() => onOpen("timeline")}>
+        <span className="tile-meta">最新记录</span>
+        <h3>{featuredRecord?.title || "暂无记录"}</h3>
+        <p>{featuredRecord?.content || "点击新增，把第一段内容写入数据库。"}</p>
+        {featuredRecord?.tags && (
+          <div className="tag-row">
+            {featuredRecord.tags.split(",").filter(Boolean).map((tag) => (
+              <span key={tag}>{tag}</span>
+            ))}
+          </div>
+        )}
+      </button>
+
+      <button className="overview-tile tall glass-card" type="button" onClick={() => onOpen("letters")}>
+        <span className="tile-meta">最新情书</span>
+        <h3>{latestLetter?.title || "暂无情书"}</h3>
+        <p>{latestLetter?.content || "写下内容后会从数据库同步显示。"}</p>
+      </button>
+
+      <div className="overview-tile glass-card stat-cluster">
+        <MiniStat label="记录天数" value={`${stats.daysTogether || 0} 天`} />
+        <MiniStat label="心情均值" value={moodAverage} />
+        <MiniStat label="珍藏回忆" value={stats.favoriteRecords || 0} />
+        <MiniStat label="小情书" value={stats.totalLetters || 0} />
+      </div>
+
+      <button className="overview-tile glass-card" type="button" onClick={() => onOpen("wishes")}>
+        <span className="tile-meta">待完成愿望</span>
+        <h3>{wishes[0]?.content || "暂无愿望"}</h3>
+        <p>{wishes[0]?.target_date ? `目标日期：${formatDate(wishes[0].target_date)}` : "新增愿望后会出现在这里。"}</p>
+      </button>
+
+      <div className="overview-tile wide glass-card">
+        <span className="tile-meta">最近三段</span>
+        {recentRecords.length ? (
+          <div className="mini-timeline">
+            {recentRecords.map((record) => (
+              <button key={record.id} type="button" onClick={() => onOpen("timeline")}>
+                <span>{formatDate(record.date)}</span>
+                <strong>{record.title}</strong>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <button className="text-link" type="button" onClick={() => onCreate("record")}>
+            新增第一条时光记录
+          </button>
+        )}
+      </div>
+
+      <div className="overview-tile glass-card mood-strip-card">
+        <span className="tile-meta">心情走势</span>
+        {moods.length ? (
+          <div className="mood-strip">
+            {moods.slice(0, 9).reverse().map((mood) => (
+              <span key={`${mood.date}-${mood.id}`} style={{ "--mood": mood.mood }} title={moodLabels[mood.mood]} />
+            ))}
+          </div>
+        ) : (
+          <p>暂无心情记录。</p>
+        )}
+        <button className="text-link" type="button" onClick={() => onCreate("mood")}>
+          记录今天
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function TimelineView({ records, search, setSearch, typeFilter, setTypeFilter, onCreate, onEdit, onDelete }) {
+  return (
+    <div className="view-stack">
+      <div className="toolbar">
+        <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索标题、地点或标签" />
+        <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
+          {Object.entries(recordTypes).map(([key, label]) => (
+            <option key={key} value={key}>
+              {label}
+            </option>
+          ))}
+        </select>
+        <button className="primary-action compact" type="button" onClick={onCreate}>
+          ＋ 新记录
+        </button>
+      </div>
+
+      {records.length ? (
+        <div className="timeline-list">
+          {records.map((record) => (
+            <article className="record-card glass-card" key={record.id}>
+              <div className="record-date">
+                <span>{formatDate(record.date)}</span>
+                <strong>{recordTypes[record.type] || record.type}</strong>
+              </div>
+              <div className="record-body">
+                <div className="record-title-row">
+                  <h3>{record.title}</h3>
+                  {record.is_favorite && <span className="favorite-mark">♥</span>}
+                </div>
+                <p>{record.content || "暂无内容"}</p>
+                <div className="record-meta">
+                  {record.location && <span>{record.location}</span>}
+                  <span>{moodLabels[record.mood] || "心情"}</span>
+                  {(record.tags || "").split(",").filter(Boolean).slice(0, 3).map((tag) => (
+                    <span key={tag}>{tag}</span>
+                  ))}
+                </div>
+              </div>
+              <div className="card-actions">
+                <button className="secondary-action compact" type="button" onClick={() => onEdit(record)}>
+                  编辑
+                </button>
+                <button className="danger-action compact" type="button" onClick={() => onDelete(record.id)}>
+                  删除
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <EmptyState title="暂无时光记录" action="点击「新记录」写入数据库。" />
+      )}
+    </div>
+  )
+}
+
+function AnniversaryView({ anniversaries, onCreate, onEdit, onDelete }) {
+  return (
+    <div className="view-stack">
+      <div className="view-action-row">
+        <p>倒计时会按每个纪念日的下一个周年日期实时计算。</p>
+        <button className="primary-action compact" type="button" onClick={onCreate}>
+          ＋ 新纪念日
+        </button>
+      </div>
+      {anniversaries.length ? (
+        <div className="anniversary-grid">
+          {anniversaries.map((item) => {
+            const timing = getAnniversaryTiming(item.date)
+            return (
+              <article className="anniversary-card glass-card" key={item.id}>
+                <span className="anniversary-icon">{item.icon || "♥"}</span>
+                <h3>{item.name}</h3>
+                <p>原始日期：{formatDate(item.date)}</p>
+                <div className="anniversary-metrics">
+                  <strong>{timing.countdownText}</strong>
+                  <span>距离下次纪念日</span>
+                  <small>下次：{formatDate(timing.nextDate)}，第 {timing.yearCount} 周年</small>
+                  <small>已过：{timing.passedDays} 天</small>
+                </div>
+                <div className="card-actions inline">
+                  <button className="secondary-action compact" type="button" onClick={() => onEdit(item)}>
+                    编辑
+                  </button>
+                  <button className="danger-action compact" type="button" onClick={() => onDelete(item.id)}>
+                    删除
+                  </button>
+                </div>
+              </article>
+            )
+          })}
+        </div>
+      ) : (
+        <EmptyState title="暂无纪念日" action="新增后会显示真实倒计时。" />
+      )}
+    </div>
+  )
+}
+
+function MoodView({ moods, onCreate, onEdit, onDelete }) {
+  const calendar = useMemo(() => buildMoodCalendar(moods), [moods])
+
+  return (
+    <div className="mood-layout">
+      <div className="calendar glass-card">
+        <div className="view-action-row">
+          <p>按日期记录心情，重复日期会更新为最新内容。</p>
+          <button className="primary-action compact" type="button" onClick={onCreate}>
+            ＋ 新心情
+          </button>
+        </div>
+        <div className="calendar-grid">
+          {calendar.map((day, index) => (
+            <div
+              key={`${day.label}-${index}`}
+              className={day.header ? "calendar-cell is-header" : day.mood ? "calendar-cell has-mood" : "calendar-cell"}
+              style={{ "--mood": day.mood || 1 }}
+            >
+              <span>{day.header || day.label ? day.label : ""}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="mood-notes">
+        {moods.length ? (
+          moods.slice(0, 10).map((mood) => (
+            <article className="mood-note glass-card" key={mood.id}>
+              <span>{formatDate(mood.date)}</span>
+              <strong>{moodLabels[mood.mood]}</strong>
+              <p>{mood.note || "暂无备注"}</p>
+              <div className="card-actions inline">
+                <button className="secondary-action compact" type="button" onClick={() => onEdit(mood)}>
+                  编辑
+                </button>
+                <button className="danger-action compact" type="button" onClick={() => onDelete(mood.id)}>
+                  删除
+                </button>
+              </div>
+            </article>
+          ))
+        ) : (
+          <EmptyState title="暂无心情记录" action="点击「新心情」写入数据库。" />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function WishView({ wishes, onCreate, onEdit, onToggle, onDelete }) {
+  return (
+    <div className="view-stack">
+      <div className="view-action-row">
+        <p>愿望支持新增、编辑、完成状态切换和删除。</p>
+        <button className="primary-action compact" type="button" onClick={onCreate}>
+          ＋ 新愿望
+        </button>
+      </div>
+      {wishes.length ? (
+        <div className="wish-grid">
+          {wishes.map((wish) => (
+            <article className={wish.completed ? "wish-card glass-card is-done" : "wish-card glass-card"} key={wish.id}>
+              <button className="check-button" type="button" onClick={() => onToggle(wish)} aria-label="切换愿望状态">
+                {wish.completed ? "✓" : ""}
+              </button>
+              <div>
+                <span>{priorityLabels[wish.priority] || "普通"}</span>
+                <h3>{wish.content}</h3>
+                {wish.target_date && <p>目标：{formatDate(wish.target_date)}</p>}
+              </div>
+              <div className="card-actions">
+                <button className="secondary-action compact" type="button" onClick={() => onEdit(wish)}>
+                  编辑
+                </button>
+                <button className="danger-action compact" type="button" onClick={() => onDelete(wish.id)}>
+                  删除
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <EmptyState title="暂无愿望" action="新增愿望后会保存到数据库。" />
+      )}
+    </div>
+  )
+}
+
+function LetterView({ letters, onCreate, onEdit, onDelete }) {
+  return (
+    <div className="view-stack">
+      <div className="view-action-row">
+        <p>情书内容来自数据库，可随时修改或删除。</p>
+        <button className="primary-action compact" type="button" onClick={onCreate}>
+          ＋ 新情书
+        </button>
+      </div>
+      {letters.length ? (
+        <div className="letter-grid">
+          {letters.map((letter) => (
+            <article className="letter-card glass-card" key={letter.id}>
+              <span>{letter.visible_on ? formatDate(letter.visible_on) : "未设置日期"}</span>
+              <h3>{letter.title}</h3>
+              <p>{letter.content}</p>
+              <div className="card-actions inline">
+                <button className="secondary-action compact" type="button" onClick={() => onEdit(letter)}>
+                  编辑
+                </button>
+                <button className="danger-action compact" type="button" onClick={() => onDelete(letter.id)}>
+                  删除
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <EmptyState title="暂无情书" action="新增后会保存到数据库。" />
+      )}
+    </div>
+  )
+}
+
+function RecordForm({ value, setValue, onSubmit, mode }) {
+  const update = (key, next) => setValue((current) => ({ ...current, [key]: next }))
+  return (
+    <form className="modal-form" onSubmit={onSubmit}>
+      <div className="form-grid">
+        <label>
+          <span>日期</span>
+          <input type="date" value={value.date || ""} onChange={(event) => update("date", event.target.value)} />
+        </label>
+        <label>
+          <span>类型</span>
+          <select value={value.type || "daily"} onChange={(event) => update("type", event.target.value)}>
+            {Object.entries(recordTypes).filter(([key]) => key !== "all").map(([key, label]) => (
+              <option key={key} value={key}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <label>
+        <span>标题</span>
+        <input value={value.title || ""} onChange={(event) => update("title", event.target.value)} placeholder="标题" />
+      </label>
+      <label>
+        <span>内容</span>
+        <textarea value={value.content || ""} onChange={(event) => update("content", event.target.value)} rows={5} placeholder="内容" />
+      </label>
+      <div className="form-grid">
+        <label>
+          <span>地点</span>
+          <input value={value.location || ""} onChange={(event) => update("location", event.target.value)} placeholder="地点" />
+        </label>
+        <label>
+          <span>心情</span>
+          <select value={value.mood || 3} onChange={(event) => update("mood", Number(event.target.value))}>
+            {Object.entries(moodLabels).map(([key, label]) => (
+              <option key={key} value={key}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <label>
+        <span>标签</span>
+        <input value={value.tags || ""} onChange={(event) => update("tags", event.target.value)} placeholder="用英文逗号分隔" />
+      </label>
+      <label className="check-line">
+        <input type="checkbox" checked={Boolean(value.is_favorite)} onChange={(event) => update("is_favorite", event.target.checked)} />
+        <span>设为珍藏回忆</span>
+      </label>
+      <FormActions mode={mode} />
+    </form>
+  )
+}
+
+function AnniversaryForm({ value, setValue, onSubmit, mode }) {
+  const update = (key, next) => setValue((current) => ({ ...current, [key]: next }))
+  return (
+    <form className="modal-form" onSubmit={onSubmit}>
+      <label>
+        <span>名称</span>
+        <input value={value.name || ""} onChange={(event) => update("name", event.target.value)} placeholder="纪念日名称" />
+      </label>
+      <div className="form-grid">
+        <label>
+          <span>日期</span>
+          <input type="date" value={value.date || ""} onChange={(event) => update("date", event.target.value)} />
+        </label>
+        <label>
+          <span>标记</span>
+          <input value={value.icon || ""} maxLength={2} onChange={(event) => update("icon", event.target.value)} />
+        </label>
+      </div>
+      <FormActions mode={mode} />
+    </form>
+  )
+}
+
+function MoodForm({ value, setValue, onSubmit, mode }) {
+  const update = (key, next) => setValue((current) => ({ ...current, [key]: next }))
+  return (
+    <form className="modal-form" onSubmit={onSubmit}>
+      <div className="form-grid">
+        <label>
+          <span>日期</span>
+          <input type="date" value={value.date || ""} onChange={(event) => update("date", event.target.value)} />
+        </label>
+        <label>
+          <span>心情</span>
+          <select value={value.mood || 3} onChange={(event) => update("mood", Number(event.target.value))}>
+            {Object.entries(moodLabels).map(([key, label]) => (
+              <option key={key} value={key}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <label>
+        <span>备注</span>
+        <textarea value={value.note || ""} onChange={(event) => update("note", event.target.value)} rows={4} placeholder="备注" />
+      </label>
+      <FormActions mode={mode} />
+    </form>
+  )
+}
+
+function WishForm({ value, setValue, onSubmit, mode }) {
+  const update = (key, next) => setValue((current) => ({ ...current, [key]: next }))
+  return (
+    <form className="modal-form" onSubmit={onSubmit}>
+      <label>
+        <span>愿望</span>
+        <input value={value.content || ""} onChange={(event) => update("content", event.target.value)} placeholder="愿望内容" />
+      </label>
+      <div className="form-grid">
+        <label>
+          <span>优先级</span>
+          <select value={value.priority || "medium"} onChange={(event) => update("priority", event.target.value)}>
+            {Object.entries(priorityLabels).map(([key, label]) => (
+              <option key={key} value={key}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>目标日期</span>
+          <input type="date" value={value.target_date || ""} onChange={(event) => update("target_date", event.target.value)} />
+        </label>
+      </div>
+      <FormActions mode={mode} />
+    </form>
+  )
+}
+
+function LetterForm({ value, setValue, onSubmit, mode }) {
+  const update = (key, next) => setValue((current) => ({ ...current, [key]: next }))
+  return (
+    <form className="modal-form" onSubmit={onSubmit}>
+      <label>
+        <span>标题</span>
+        <input value={value.title || ""} onChange={(event) => update("title", event.target.value)} placeholder="标题" />
+      </label>
+      <label>
+        <span>内容</span>
+        <textarea value={value.content || ""} onChange={(event) => update("content", event.target.value)} rows={6} placeholder="内容" />
+      </label>
+      <label>
+        <span>日期</span>
+        <input type="date" value={value.visible_on || ""} onChange={(event) => update("visible_on", event.target.value)} />
+      </label>
+      <FormActions mode={mode} />
+    </form>
+  )
+}
+
+function FormActions({ mode }) {
+  return (
+    <div className="form-actions">
+      <button className="primary-action compact" type="submit">
+        {mode === "edit" ? "保存修改" : "新增保存"}
+      </button>
+    </div>
+  )
+}
+
+function Modal({ title, children, onClose }) {
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <section className="modal-panel glass-panel" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <h2>{title}</h2>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="关闭弹窗">
+            ×
+          </button>
+        </div>
+        {children}
+      </section>
+    </div>
+  )
+}
+
+function MiniStat({ label, value }) {
+  return (
+    <div className="mini-stat">
+      <strong>{value}</strong>
+      <span>{label}</span>
+    </div>
+  )
+}
+
+function EmptyState({ title, action }) {
+  return (
+    <div className="empty-state glass-card">
+      <strong>{title}</strong>
+      <span>{action}</span>
+    </div>
+  )
+}
+
+function buildMoodCalendar(moods) {
+  const now = new Date()
+  const year = now.getFullYear()
+  const month = now.getMonth()
+  const firstDay = new Date(year, month, 1).getDay()
+  const daysInMonth = new Date(year, month + 1, 0).getDate()
+  const headers = ["日", "一", "二", "三", "四", "五", "六"].map((label) => ({ label, header: true }))
+  const blanks = Array.from({ length: firstDay }, (_, index) => ({ label: "", blank: index }))
+  const days = Array.from({ length: daysInMonth }, (_, index) => {
+    const day = index + 1
+    const date = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`
+    const match = moods.find((mood) => mood.date === date)
+    return { label: day, mood: match?.mood }
+  })
+  return [...headers, ...blanks, ...days]
 }
