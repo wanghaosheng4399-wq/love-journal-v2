@@ -9,8 +9,8 @@ const sans = Noto_Sans_SC({
 })
 
 export const metadata = {
-  title: "恋爱日记",
-  description: "一座给两个人收藏回忆、纪念日、心情和愿望的海边恋爱网站。",
+  title: "情侣空间",
+  description: "一个带登录、情侣绑定、私密内容和共享记录的恋爱日记网站。",
 }
 
 export default function RootLayout({ children }) {

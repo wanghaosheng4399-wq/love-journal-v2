@@ -1,12 +1,20 @@
-import { ensureDb, pool } from "../../../lib/db"
+import { apiError, getPartnerId, getRequiredUser } from "../../../lib/auth"
+import { query } from "../../../lib/db"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
+function scopeSql(alias, partnerId, sharedOnly = false) {
+  if (!partnerId) return `${alias}.user_id = $1`
+  if (sharedOnly) return `${alias}.user_id = $1 OR (${alias}.user_id = $2 AND ${alias}.visibility = 'shared')`
+  return `${alias}.user_id = $1 OR (${alias}.user_id = $2 AND ${alias}.visibility = 'shared')`
+}
+
 export async function GET() {
   try {
-    const ready = await ensureDb()
-    if (!ready) return Response.json({ error: "DATABASE_URL 未配置" }, { status: 503 })
+    const user = await getRequiredUser()
+    const partnerId = await getPartnerId(user.id)
+    const params = partnerId ? [user.id, partnerId] : [user.id]
 
     const [
       totalRecords,
@@ -14,27 +22,34 @@ export async function GET() {
       totalMoods,
       totalWishes,
       completedWishes,
-      avgMood,
       annCount,
       letterCount,
       firstDateRow,
     ] = await Promise.all([
-      pool.query("SELECT COUNT(*)::int AS count FROM records"),
-      pool.query("SELECT COUNT(*)::int AS count FROM records WHERE is_favorite = TRUE"),
-      pool.query("SELECT COUNT(*)::int AS count FROM moods"),
-      pool.query("SELECT COUNT(*)::int AS count FROM wishes"),
-      pool.query("SELECT COUNT(*)::int AS count FROM wishes WHERE completed = TRUE"),
-      pool.query("SELECT AVG(mood)::numeric(10,1) AS avg FROM moods"),
-      pool.query("SELECT COUNT(*)::int AS count FROM anniversaries"),
-      pool.query("SELECT COUNT(*)::int AS count FROM letters"),
-      pool.query(`
-        SELECT MIN(date) AS first_date
-        FROM (
-          SELECT date FROM records WHERE date <> ''
-          UNION ALL
-          SELECT date FROM anniversaries WHERE date <> ''
-        ) AS all_dates
-      `),
+      query(`SELECT COUNT(*)::int AS count FROM records r WHERE r.deleted_at IS NULL AND (${scopeSql("r", partnerId)})`, params),
+      query(
+        `SELECT COUNT(*)::int AS count FROM records r WHERE r.deleted_at IS NULL AND r.is_favorite = TRUE AND (${scopeSql("r", partnerId)})`,
+        params,
+      ),
+      query(`SELECT COUNT(*)::int AS count FROM moods m WHERE m.deleted_at IS NULL AND (${scopeSql("m", partnerId)})`, params),
+      query(`SELECT COUNT(*)::int AS count FROM wishes w WHERE w.deleted_at IS NULL AND (${scopeSql("w", partnerId)})`, params),
+      query(
+        `SELECT COUNT(*)::int AS count FROM wishes w WHERE w.deleted_at IS NULL AND w.completed = TRUE AND (${scopeSql("w", partnerId)})`,
+        params,
+      ),
+      query(`SELECT COUNT(*)::int AS count FROM anniversaries a WHERE a.deleted_at IS NULL AND (${scopeSql("a", partnerId)})`, params),
+      query(`SELECT COUNT(*)::int AS count FROM letters l WHERE l.deleted_at IS NULL AND (${scopeSql("l", partnerId)})`, params),
+      query(
+        `
+          SELECT MIN(date) AS first_date
+          FROM (
+            SELECT date FROM records r WHERE r.deleted_at IS NULL AND r.date <> '' AND (${scopeSql("r", partnerId)})
+            UNION ALL
+            SELECT date FROM anniversaries a WHERE a.deleted_at IS NULL AND a.date <> '' AND (${scopeSql("a", partnerId)})
+          ) AS all_dates
+        `,
+        params,
+      ),
     ])
 
     const startDate = firstDateRow.rows[0]?.first_date
@@ -47,13 +62,11 @@ export async function GET() {
       totalMoods: totalMoods.rows[0].count,
       totalWishes: totalWishes.rows[0].count,
       completedWishes: completedWishes.rows[0].count,
-      avgMood: avgMood.rows[0].avg || "-",
       daysTogether,
       anniversaries: annCount.rows[0].count,
       totalLetters: letterCount.rows[0].count,
     })
   } catch (error) {
-    console.error("GET /api/stats failed", error)
-    return Response.json({ error: "读取统计失败" }, { status: 500 })
+    return apiError(error, "读取统计失败")
   }
 }
